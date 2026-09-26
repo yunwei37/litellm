@@ -1,0 +1,103 @@
+name: Build spark LiteLLM image
+
+# Builds the spark fork's proxy image from the repository's own Dockerfile
+# and publishes ghcr.io/<owner>/litellm:<upstream-version>-spark-<sha>.
+on:
+  push:
+    branches: ["spark/**"]
+
+permissions: {}
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Image tag
+        id: tag
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          echo "tag=v${version}-spark-${GITHUB_SHA::10}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and smoke-test
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euxo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/litellm:${TAG}-${ARCH}"
+          docker buildx build --platform "linux/${ARCH}" --load -t "$image" .
+
+          # The enterprise/ package must not be in the image; the spark hooks must be.
+          docker run --rm --entrypoint python "$image" -c '
+          import importlib.util, os
+          assert importlib.util.find_spec("litellm_enterprise") is None
+          assert not os.path.exists("/app/enterprise")
+          import litellm.spark.backend_priority, litellm.spark.effort_normalize
+          from litellm.proxy.auth.litellm_license import LicenseCheck
+          assert LicenseCheck().is_premium() is True
+          '
+
+          cat > /tmp/smoke.yaml <<'YAML'
+          model_list:
+            - model_name: smoke
+              litellm_params: {model: hosted_vllm/qwen3.8-27b-nvfp4, api_base: http://127.0.0.1:9/v1, api_key: x}
+          litellm_settings:
+            callbacks: ["prometheus", "litellm.spark.effort_normalize.handler", "litellm.spark.backend_priority.handler"]
+          general_settings:
+            master_key: sk-smoke
+          YAML
+          docker run -d --name smoke -p 4000:4000 -v /tmp/smoke.yaml:/tmp/smoke.yaml:ro "$image" --config /tmp/smoke.yaml --port 4000
+          for i in $(seq 1 60); do curl -sf localhost:4000/health/liveliness && break; sleep 2; done
+          curl -sf localhost:4000/health/liveliness
+          curl -sf -H "Authorization: Bearer sk-smoke" localhost:4000/v1/models | grep -q '"smoke"'
+          docker logs smoke 2>&1 | tail -20
+          docker rm -f smoke
+
+          docker push "$image"
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Multi-architecture index
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euxo pipefail
+          base="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/litellm:${TAG}"
+          docker buildx imagetools create -t "$base" "${base}-amd64" "${base}-arm64"
+          digest=$(docker buildx imagetools inspect "$base" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "### ${base}@${digest}" >> "$GITHUB_STEP_SUMMARY"
