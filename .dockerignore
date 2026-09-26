@@ -56,3 +56,6 @@ litellm/rust_bridge/_native*.so
 *.log
 .env
 .env.local
+
+# spark fork: the BerriAI Enterprise License package is not part of the image
+enterprise
