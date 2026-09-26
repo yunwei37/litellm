@@ -8589,6 +8589,9 @@ async def async_data_generator(
     request: Request | None = None,
 ):
     verbose_proxy_logger.debug("inside generator")
+    # Responses error event repair (2026-09-10).
+    is_responses_stream = request is not None and request.url.path.rstrip("/").endswith("/responses")
+    responses_sequence_number = -1
     stream_completed = False
     client_disconnected = False
     try:
@@ -8649,6 +8652,10 @@ async def async_data_generator(
         )
 
         async for item in stream_source:
+            if is_responses_stream and item is not _STREAM_KEEPALIVE:
+                sequence = item.get("sequence_number") if isinstance(item, dict) else getattr(item, "sequence_number", None)
+                if isinstance(sequence, int):
+                    responses_sequence_number = max(responses_sequence_number, sequence)
             if item is _STREAM_KEEPALIVE:
                 yield ": ping\n\n"
                 continue
@@ -8802,9 +8809,19 @@ async def async_data_generator(
             param=getattr(e, "param", "None"),
             code=getattr(e, "status_code", 500),
         )
-        error_returned: Final = json.dumps({"error": proxy_exception.to_dict()})
         stream_completed = True
-        yield f"data: {error_returned}\n\n"
+        if is_responses_stream:
+            error_returned: Final = json.dumps({
+                "type": "error",
+                "sequence_number": responses_sequence_number + 1,
+                "code": str(proxy_exception.code),
+                "message": proxy_exception.message,
+                "param": None if proxy_exception.param == "None" else proxy_exception.param,
+            })
+            yield f"event: error\ndata: {error_returned}\n\n"
+        else:
+            error_returned: Final = json.dumps({"error": proxy_exception.to_dict()})
+            yield f"data: {error_returned}\n\n"
     finally:
         await ProxyBaseLLMRequestProcessing._finalize_streaming_generator_cleanup(
             request=request,

@@ -539,6 +539,26 @@ class MaskedHTTPStatusError(httpx.HTTPStatusError):
         self.status_code = original_error.response.status_code
 
 
+class _ClientOwnedStream(httpx.AsyncByteStream):
+    """An in-flight response outlives eviction of its cached HTTP handler."""
+    def __init__(self, stream, owner):
+        self._stream = stream
+        self._owner = owner
+
+    async def __aiter__(self):
+        try:
+            async for chunk in self._stream:
+                yield chunk
+        finally:
+            await self.aclose()
+
+    async def aclose(self):
+        try:
+            await self._stream.aclose()
+        finally:
+            self._owner = None
+
+
 class AsyncHTTPHandler:
     def __init__(
         self,
@@ -686,6 +706,8 @@ class AsyncHTTPHandler:
             )
             response: Final = await self.client.send(req, stream=stream)
             response.raise_for_status()
+            if stream:
+                response.stream = _ClientOwnedStream(response.stream, self)
             return response
         except (httpx.RemoteProtocolError, httpx.ConnectError):
             # Retry the request with a new session if there is a connection error
