@@ -14,19 +14,11 @@ def test_read_public_key_loads_successfully():
     ), "public_key.pem could not be loaded — check for leading whitespace or malformed PEM header"
 
 
-def test_is_over_limit():
+def test_spark_fork_has_no_license_gate():
     license_check = LicenseCheck()
-    license_check.airgapped_license_data = {"max_users": 100}
-    assert license_check.is_over_limit(101) is True
-    assert license_check.is_over_limit(100) is False
-    assert license_check.is_over_limit(99) is False
-
-    license_check.airgapped_license_data = {}
-    assert license_check.is_over_limit(101) is False
-    assert license_check.is_over_limit(100) is False
-    assert license_check.is_over_limit(99) is False
-
-    license_check.airgapped_license_data = None
-    assert license_check.is_over_limit(101) is False
-    assert license_check.is_over_limit(100) is False
-    assert license_check.is_over_limit(99) is False
+    license_check.license_str = None
+    assert license_check.is_premium() is True
+    for data in ({"max_users": 100, "max_teams": 1}, {}, None):
+        license_check.airgapped_license_data = data
+        assert license_check.is_over_limit(101) is False
+        assert license_check.is_team_count_over_limit(2) is False
