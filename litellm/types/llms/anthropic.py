@@ -629,9 +629,8 @@ class AnthropicResponseContentBlockToolUse(BaseModel):
     id: str
     name: str
     input: dict
-    provider_specific_fields: dict[str, Any] | None = None
 
-    model_config = ConfigDict(extra="allow")  # Allow provider_specific_fields
+    model_config = ConfigDict(extra="allow")
 
 
 class AnthropicResponseContentBlockThinking(BaseModel):

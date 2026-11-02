@@ -1,4 +1,5 @@
 import base64
+import json
 from typing import Any, cast
 
 import pytest
@@ -125,7 +126,7 @@ def test_translate_streaming_openai_chunk_strips_gemini_thought_from_tool_call_i
     assert content_block_start["id"] == base
     assert content_block_start["name"] == "add_numbers"
     assert content_block_start["input"] == {}
-    assert content_block_start["provider_specific_fields"]["signature"] == sig
+    assert set(content_block_start) == {"type", "id", "name", "input"}
 
 
 def test_translate_streaming_openai_chunk_to_anthropic_thinking_content_block():
@@ -871,6 +872,55 @@ def test_translate_openai_content_to_anthropic_strips_gemini_thought_from_tool_c
     assert THOUGHT_SIGNATURE_SEPARATOR not in result[0]["id"]
     assert result[0]["name"] == "get_weather"
     assert result[0]["input"] == {"location": "Boston"}
+
+
+@pytest.mark.parametrize(
+    "tool_call",
+    [
+        pytest.param(
+            {
+                "id": "call_plain",
+                "type": "function",
+                "function": {"name": "get_time", "arguments": '{"city": "Paris"}'},
+            },
+            id="no_signature",
+        ),
+        pytest.param(
+            {
+                "id": f"call_plain{THOUGHT_SIGNATURE_SEPARATOR}c2lnbmF0dXJl",
+                "type": "function",
+                "function": {"name": "get_time", "arguments": '{"city": "Paris"}'},
+                "provider_specific_fields": {"thought_signature": "c2lnbmF0dXJl"},
+            },
+            id="thought_signature",
+        ),
+    ],
+)
+def test_translate_openai_response_to_anthropic_tool_use_has_only_anthropic_keys(tool_call: dict[str, object]):
+    """Clients store these blocks and replay them, and the Anthropic API rejects any
+    key outside the tool_use schema with a 400 on every later request."""
+    response = ModelResponse(
+        id="7daa022babbe492085e06fcda2c7efdb",
+        model="claude-local-large",
+        choices=[
+            Choices(
+                finish_reason="tool_calls",
+                message=Message(role="assistant", content="Checking.", tool_calls=[tool_call]),
+            )
+        ],
+        usage=Usage(prompt_tokens=5, completion_tokens=3, total_tokens=8),
+    )
+
+    result = LiteLLMAnthropicMessagesAdapter().translate_openai_response_to_anthropic(response=response)
+
+    tool_use = next(block for block in result["content"] if block["type"] == "tool_use")
+    assert tool_use == {
+        "type": "tool_use",
+        "id": "call_plain",
+        "name": "get_time",
+        "input": {"city": "Paris"},
+    }
+    assert "provider_specific_fields" not in json.dumps(result)
 
 
 def test_translate_openai_content_to_anthropic_sanitizes_colon_dot_tool_call_ids():

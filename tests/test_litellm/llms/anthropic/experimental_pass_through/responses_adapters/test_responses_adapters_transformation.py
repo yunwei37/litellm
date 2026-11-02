@@ -1254,6 +1254,17 @@ class TestTranslateResponse:
         assert result["content"][0]["text"] == "Part 1"
         assert result["content"][1]["text"] == "Part 2"
 
+    def test_function_call_tool_use_has_only_anthropic_keys(self):
+        """Clients replay tool_use blocks verbatim, and the Anthropic API rejects extra keys."""
+        for item in (
+            _make_function_call_item("call_1", "get_time", '{"city": "Paris"}'),
+            {"type": "function_call", "call_id": "call_1", "name": "get_time", "arguments": '{"city": "Paris"}'},
+        ):
+            result: Any = _ADAPTER.translate_response(_make_mock_response(output=[item]))
+            assert result["content"] == [
+                {"type": "tool_use", "id": "call_1", "name": "get_time", "input": {"city": "Paris"}}
+            ]
+
     def test_function_call_becomes_tool_use(self):
         """ResponseFunctionToolCall -> Anthropic tool_use content block."""
         fc = _make_function_call_item("call_99", "get_weather", '{"city": "NYC"}')

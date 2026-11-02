@@ -83,9 +83,6 @@ from litellm.litellm_core_utils.prompt_templates.common_utils import (
     reasoning_content_from_thinking_blocks,
     with_prompt_cache_breakpoint,
 )
-from litellm.litellm_core_utils.prompt_templates.factory import (
-    THOUGHT_SIGNATURE_SEPARATOR,
-)
 from litellm.litellm_core_utils.reasoning_effort_utils import (
     reasoning_effort_from_thinking_budget,
 )
@@ -285,22 +282,6 @@ class LiteLLMAnthropicMessagesAdapter:
         pass
 
     ### FOR [BETA] `/v1/messages` endpoint support
-
-    def _extract_signature_from_tool_call(self, tool_call: Any) -> str | None:
-        """
-        Extract signature from a tool call's provider_specific_fields.
-        Only checks provider_specific_fields, not thinking blocks.
-        """
-        signature = None
-
-        if hasattr(tool_call, "provider_specific_fields") and tool_call.provider_specific_fields:
-            if "thought_signature" in tool_call.provider_specific_fields:
-                signature = tool_call.provider_specific_fields["thought_signature"]
-        elif hasattr(tool_call.function, "provider_specific_fields") and tool_call.function.provider_specific_fields:
-            if "thought_signature" in tool_call.function.provider_specific_fields:
-                signature = tool_call.function.provider_specific_fields["thought_signature"]
-
-        return signature
 
     def _extract_signature_from_tool_use_content(self, content: dict[str, Any]) -> str | None:
         """
@@ -1304,13 +1285,6 @@ class LiteLLMAnthropicMessagesAdapter:
             # Handle tool calls (in parallel to text content)
             if choice.message.tool_calls is not None and len(choice.message.tool_calls) > 0:
                 for tool_call in choice.message.tool_calls:
-                    # Extract signature from provider_specific_fields only
-                    signature = self._extract_signature_from_tool_call(tool_call)
-
-                    provider_specific_fields = {}
-                    if signature:
-                        provider_specific_fields["signature"] = signature
-
                     # Restore original tool name if it was truncated
                     truncated_name = tool_call.function.name or ""
                     original_name = (
@@ -1320,20 +1294,18 @@ class LiteLLMAnthropicMessagesAdapter:
                     # Strip Gemini thought-signature suffix and normalize id chars
                     # (e.g. ``functions.Bash:0`` from cross-provider clients).
                     raw_id = tool_call.id or ""
-                    tool_use_block = AnthropicResponseContentBlockToolUse(
-                        type="tool_use",
-                        id=normalize_anthropic_tool_use_id(raw_id),
-                        name=original_name,
-                        input=parse_tool_call_arguments(
-                            tool_call.function.arguments,
-                            tool_name=original_name,
-                            context="Anthropic pass-through adapter",
-                        ),
+                    new_content.append(
+                        AnthropicResponseContentBlockToolUse(
+                            type="tool_use",
+                            id=normalize_anthropic_tool_use_id(raw_id),
+                            name=original_name,
+                            input=parse_tool_call_arguments(
+                                tool_call.function.arguments,
+                                tool_name=original_name,
+                                context="Anthropic pass-through adapter",
+                            ),
+                        ).model_dump()
                     )
-                    # Add provider_specific_fields if signature is present
-                    if provider_specific_fields:
-                        tool_use_block.provider_specific_fields = provider_specific_fields
-                    new_content.append(tool_use_block.model_dump())
 
         return new_content
 
@@ -1513,20 +1485,12 @@ class LiteLLMAnthropicMessagesAdapter:
             ):
                 raw_id = choice.delta.tool_calls[0].id or str(uuid.uuid4())
                 tool_name = choice.delta.tool_calls[0].function.name or ""
-                thought_sig: str | None = None
-                if THOUGHT_SIGNATURE_SEPARATOR in raw_id:
-                    parts = raw_id.split(THOUGHT_SIGNATURE_SEPARATOR, 1)
-                    thought_sig = parts[1] if len(parts) > 1 else None
                 tool_block: dict[str, object] = {
                     "type": "tool_use",
                     "id": normalize_anthropic_tool_use_id(raw_id),
                     "name": tool_name,
                     "input": {},
                 }
-                if thought_sig:
-                    tool_block["provider_specific_fields"] = {
-                        "signature": thought_sig,
-                    }
                 return "tool_use", cast("ContentBlockContentBlockDict", tool_block)
             elif choice.delta.content is not None and len(choice.delta.content) > 0:
                 return "text", TextBlock(type="text", text="")
